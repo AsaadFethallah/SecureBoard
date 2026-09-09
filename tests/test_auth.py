@@ -1,14 +1,9 @@
 from fastapi.testclient import TestClient
 
-from app.api.users import users
 from app.main import app
 
 
 client = TestClient(app)
-
-
-def setup_function():
-    users.clear()
 
 
 def register_user():
@@ -56,7 +51,9 @@ def test_login_wrong_password():
 
 
 def test_protected_endpoint_without_token():
-    response = client.get("/auth/me")
+    response = client.get(
+        "/auth/me"
+    )
 
     assert response.status_code == 401
 
@@ -72,7 +69,9 @@ def test_protected_endpoint_with_token():
         },
     )
 
-    token = login_response.json()["access_token"]
+    token = login_response.json()[
+        "access_token"
+    ]
 
     response = client.get(
         "/auth/me",

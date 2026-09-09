@@ -1,14 +1,9 @@
 from fastapi.testclient import TestClient
 
-from app.api.users import users
 from app.main import app
 
 
 client = TestClient(app)
-
-
-def setup_function():
-    users.clear()
 
 
 def test_create_user():
@@ -27,6 +22,7 @@ def test_create_user():
 
     assert data["username"] == "asaad"
     assert data["email"] == "asaad@example.com"
+
     assert "password" not in data
     assert "hashed_password" not in data
 
@@ -51,8 +47,15 @@ def test_duplicate_email():
         "password": "SecurePassword123",
     }
 
-    first_response = client.post("/users/", json=user)
-    second_response = client.post("/users/", json=user)
+    first_response = client.post(
+        "/users/",
+        json=user,
+    )
+
+    second_response = client.post(
+        "/users/",
+        json=user,
+    )
 
     assert first_response.status_code == 201
     assert second_response.status_code == 409
