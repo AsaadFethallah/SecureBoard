@@ -97,3 +97,26 @@ jobs:
             ghcr.io/gitleaks/gitleaks:v8.30.1 \
             git . \
             --redact
+
+
+  sca:
+    name: Trivy dependency scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Run Trivy vulnerability scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            ghcr.io/aquasecurity/trivy:0.74.0 \
+            fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --no-progress \
+            .
