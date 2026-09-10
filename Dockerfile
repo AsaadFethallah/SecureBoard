@@ -7,7 +7,8 @@ ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt \
+    && python -m pip uninstall -y pip setuptools wheel
 
 COPY app ./app
 COPY alembic ./alembic

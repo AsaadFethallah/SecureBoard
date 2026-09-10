@@ -120,3 +120,33 @@ jobs:
             --exit-code 1 \
             --no-progress \
             .
+
+
+  container_security:
+    name: Trivy container image scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Build SecureBoard image
+        run: |
+          docker build \
+            --pull \
+            -t secureboard-api:ci \
+            .
+
+      - name: Scan container image
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            ghcr.io/aquasecurity/trivy:0.74.0 \
+            image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            secureboard-api:ci
