@@ -76,3 +76,24 @@ jobs:
             --config=auto \
             --error \
             /src
+
+  
+  secrets:
+    name: Gitleaks secret scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git . \
+            --redact
