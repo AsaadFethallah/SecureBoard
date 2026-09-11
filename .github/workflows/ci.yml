@@ -444,11 +444,14 @@ jobs:
         run: |
           mkdir -p cosign-output
 
+          touch cosign-output/secureboard-api.tar.sigstore.json
+          chmod 666 cosign-output/secureboard-api.tar.sigstore.json
+
           docker run --rm \
             -e ACTIONS_ID_TOKEN_REQUEST_URL \
             -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             -v "$PWD/secureboard-api.tar:/work/secureboard-api.tar:ro" \
-            -v "$PWD/cosign-output:/output" \
+            -v "$PWD/cosign-output/secureboard-api.tar.sigstore.json:/output/secureboard-api.tar.sigstore.json" \
             "$COSIGN_IMAGE" \
             sign-blob \
             --yes \
