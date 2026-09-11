@@ -169,3 +169,70 @@ jobs:
             -d /repo/infra \
             --framework terraform \
             --compact
+
+
+  dast:
+    name: OWASP ZAP active DAST scan
+
+    runs-on: ubuntu-latest
+
+    env:
+      POSTGRES_USER: secureboard
+      POSTGRES_PASSWORD: secureboard_dast_ci_password
+      POSTGRES_DB: secureboard
+      JWT_SECRET: secureboard-dast-ci-secret-not-for-production
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Start SecureBoard
+        run: |
+          docker compose up -d --build
+
+      - name: Apply database migrations
+        run: |
+          docker compose exec -T api alembic upgrade head
+
+      - name: Wait for SecureBoard API
+        run: |
+          for i in {1..30}; do
+            if curl --fail --silent http://localhost:8000/health > /dev/null; then
+              echo "SecureBoard API is ready"
+              exit 0
+            fi
+
+            echo "Waiting for SecureBoard API..."
+            sleep 2
+          done
+
+          echo "SecureBoard API did not become ready"
+          docker compose logs
+          exit 1
+
+      - name: Run OWASP ZAP active API scan
+        run: |
+          NETWORK=$(docker inspect secureboard-api \
+            --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}')
+
+          echo "Using Docker network: $NETWORK"
+
+          docker run --rm \
+            --network "$NETWORK" \
+            781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef \
+            zap-api-scan.py \
+            -t http://api:8000/openapi.json \
+            -f openapi \
+            -s
+
+      - name: Show application logs on failure
+        if: failure()
+        run: |
+          docker compose logs api
+
+      - name: Stop DAST environment
+        if: always()
+        run: |
+          docker compose down -v
