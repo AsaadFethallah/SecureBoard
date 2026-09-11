@@ -3,3 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .env
+
+# Generated supply-chain artifacts
+sbom.cdx.json
+secureboard-api.tar

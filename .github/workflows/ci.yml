@@ -242,3 +242,67 @@ jobs:
         if: always()
         run: |
           docker compose down -v
+
+
+  sbom:
+    name: Generate CycloneDX SBOM
+
+    runs-on: ubuntu-latest
+
+    env:
+      SYFT_IMAGE: anchore/syft@sha256:95fe0835e5bebc6f8b1f8acef68d47d63d594ef4c0f25c097ff853b23cbac74c
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Build SecureBoard image
+        run: |
+          docker build \
+            --pull \
+            -t secureboard-api:sbom \
+            .
+
+      - name: Export container image
+        run: |
+          docker save \
+            secureboard-api:sbom \
+            -o secureboard-api.tar
+
+      - name: Pull pinned Syft image
+        run: |
+          docker pull "$SYFT_IMAGE"
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            "$SYFT_IMAGE" \
+            docker-archive:/work/secureboard-api.tar \
+            -o cyclonedx-json=/work/sbom.cdx.json
+
+      - name: Validate SBOM
+        run: |
+          test "$(jq -r '.bomFormat' sbom.cdx.json)" = "CycloneDX"
+
+          COMPONENTS=$(jq '.components | length' sbom.cdx.json)
+
+          echo "SBOM components: $COMPONENTS"
+
+          if [ "$COMPONENTS" -le 0 ]; then
+            echo "SBOM contains no components"
+            exit 1
+          fi
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-sbom-cyclonedx
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove temporary image archive
+        if: always()
+        run: |
+          rm -f secureboard-api.tar
