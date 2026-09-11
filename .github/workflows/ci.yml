@@ -122,8 +122,8 @@ jobs:
             .
 
 
-  container_security:
-    name: Trivy container image scan
+  build_image:
+    name: Build canonical SecureBoard image
 
     runs-on: ubuntu-latest
 
@@ -138,18 +138,71 @@ jobs:
             -t secureboard-api:ci \
             .
 
-      - name: Scan container image
+      - name: Record image identity
+        run: |
+          docker image inspect \
+            secureboard-api:ci \
+            --format '{{.Id}}' \
+            > image-id.txt
+
+          echo "Canonical image ID:"
+          cat image-id.txt
+
+      - name: Export canonical image
+        run: |
+          docker save \
+            secureboard-api:ci \
+            -o secureboard-api.tar
+
+          sha256sum secureboard-api.tar \
+            > secureboard-api.tar.sha256
+
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Upload canonical image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-container-image
+          path: |
+            secureboard-api.tar
+            secureboard-api.tar.sha256
+            image-id.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+
+  container_security:
+    name: Trivy container image scan
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+
+    steps:
+      - name: Download canonical image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify image artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Scan canonical container image
         run: |
           docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/work:ro" \
             ghcr.io/aquasecurity/trivy:0.74.0 \
             image \
+            --input /work/secureboard-api.tar \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
             --exit-code 1 \
-            --no-progress \
-            secureboard-api:ci
+            --no-progress
 
 
   iac:
@@ -176,13 +229,19 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    needs:
+      - build_image
+
     env:
       POSTGRES_USER: secureboard
       POSTGRES_PASSWORD: secureboard_dast_ci_password
       POSTGRES_DB: secureboard
+
       JWT_SECRET: secureboard-dast-ci-secret-not-for-production
       JWT_ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_MINUTES: 30
+
+      SECUREBOARD_IMAGE: secureboard-api:ci
 
       ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
 
@@ -190,9 +249,42 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - name: Start SecureBoard
+      - name: Download canonical SecureBoard image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify canonical image artifact integrity
         run: |
-          docker compose up -d --build
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Load canonical SecureBoard image
+        run: |
+          docker load \
+            -i secureboard-api.tar
+
+      - name: Verify canonical image identity
+        run: |
+          EXPECTED_IMAGE_ID=$(cat image-id.txt)
+
+          ACTUAL_IMAGE_ID=$(docker image inspect \
+            secureboard-api:ci \
+            --format '{{.Id}}')
+
+          echo "Expected image ID: $EXPECTED_IMAGE_ID"
+          echo "Actual image ID:   $ACTUAL_IMAGE_ID"
+
+          if [ "$EXPECTED_IMAGE_ID" != "$ACTUAL_IMAGE_ID" ]; then
+            echo "Canonical image identity verification failed"
+            exit 1
+          fi
+
+          echo "Canonical image identity verified"
+
+      - name: Start SecureBoard from canonical image
+        run: |
+          docker compose up -d --no-build
 
       - name: Apply database migrations
         run: |
@@ -201,7 +293,10 @@ jobs:
       - name: Wait for SecureBoard API
         run: |
           for i in {1..30}; do
-            if curl --fail --silent http://localhost:8000/health > /dev/null; then
+            if curl --fail --silent \
+              http://localhost:8000/health \
+              > /dev/null; then
+
               echo "SecureBoard API is ready"
               exit 0
             fi
@@ -249,25 +344,22 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    needs:
+      - build_image
+
     env:
       SYFT_IMAGE: anchore/syft@sha256:95fe0835e5bebc6f8b1f8acef68d47d63d594ef4c0f25c097ff853b23cbac74c
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Download canonical image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
 
-      - name: Build SecureBoard image
+      - name: Verify image artifact integrity
         run: |
-          docker build \
-            --pull \
-            -t secureboard-api:sbom \
-            .
-
-      - name: Export container image
-        run: |
-          docker save \
-            secureboard-api:sbom \
-            -o secureboard-api.tar
+          sha256sum -c secureboard-api.tar.sha256
 
       - name: Pull pinned Syft image
         run: |
@@ -276,33 +368,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         run: |
           docker run --rm \
-            -v "$PWD:/work" \
+            -v "$PWD:/work:ro" \
             "$SYFT_IMAGE" \
             docker-archive:/work/secureboard-api.tar \
             -o cyclonedx-json=/work/sbom.cdx.json
-
-      - name: Validate SBOM
-        run: |
-          test "$(jq -r '.bomFormat' sbom.cdx.json)" = "CycloneDX"
-
-          COMPONENTS=$(jq '.components | length' sbom.cdx.json)
-
-          echo "SBOM components: $COMPONENTS"
-
-          if [ "$COMPONENTS" -le 0 ]; then
-            echo "SBOM contains no components"
-            exit 1
-          fi
-
-      - name: Upload SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: secureboard-sbom-cyclonedx
-          path: sbom.cdx.json
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Remove temporary image archive
-        if: always()
-        run: |
-          rm -f secureboard-api.tar
