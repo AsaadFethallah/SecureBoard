@@ -400,3 +400,82 @@ jobs:
           path: sbom-output/sbom.cdx.json
           if-no-files-found: error
           retention-days: 30
+
+
+  sign_artifact:
+    name: Cosign keyless artifact signing
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+      - test
+      - sast
+      - secrets
+      - sca
+      - container_security
+      - iac
+      - dast
+      - sbom
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign@sha256:b29487e48205d875c324c79583e2806d9d269c0fa299e0861bbec023d8430c8b
+
+    steps:
+      - name: Download canonical SecureBoard image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify canonical artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Pull pinned Cosign image
+        run: |
+          docker pull "$COSIGN_IMAGE"
+
+      - name: Sign canonical artifact with GitHub OIDC
+        run: |
+          mkdir -p cosign-output
+
+          docker run --rm \
+            -e ACTIONS_ID_TOKEN_REQUEST_URL \
+            -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -v "$PWD/secureboard-api.tar:/work/secureboard-api.tar:ro" \
+            -v "$PWD/cosign-output:/output" \
+            "$COSIGN_IMAGE" \
+            sign-blob \
+            --yes \
+            --bundle /output/secureboard-api.tar.sigstore.json \
+            /work/secureboard-api.tar
+
+      - name: Verify Cosign signature
+        run: |
+          CERTIFICATE_IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
+
+          echo "Expected signing identity:"
+          echo "$CERTIFICATE_IDENTITY"
+
+          docker run --rm \
+            -v "$PWD/secureboard-api.tar:/work/secureboard-api.tar:ro" \
+            -v "$PWD/cosign-output:/output:ro" \
+            "$COSIGN_IMAGE" \
+            verify-blob \
+            /work/secureboard-api.tar \
+            --bundle /output/secureboard-api.tar.sigstore.json \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Upload Sigstore signature bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-cosign-signature
+          path: cosign-output/secureboard-api.tar.sigstore.json
+          if-no-files-found: error
+          retention-days: 30
