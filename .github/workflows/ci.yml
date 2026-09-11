@@ -367,8 +367,36 @@ jobs:
 
       - name: Generate CycloneDX SBOM
         run: |
+          mkdir -p sbom-output
+
           docker run --rm \
-            -v "$PWD:/work:ro" \
+            -v "$PWD/secureboard-api.tar:/work/secureboard-api.tar:ro" \
+            -v "$PWD/sbom-output:/output" \
             "$SYFT_IMAGE" \
             docker-archive:/work/secureboard-api.tar \
-            -o cyclonedx-json=/work/sbom.cdx.json
+            -o cyclonedx-json=/output/sbom.cdx.json
+
+      - name: Validate SBOM
+        run: |
+          test -f sbom-output/sbom.cdx.json
+
+          test "$(jq -r '.bomFormat' sbom-output/sbom.cdx.json)" = "CycloneDX"
+
+          COMPONENTS=$(jq '.components | length' sbom-output/sbom.cdx.json)
+
+          echo "SBOM components: $COMPONENTS"
+
+          if [ "$COMPONENTS" -le 0 ]; then
+            echo "SBOM contains no components"
+            exit 1
+          fi
+
+          echo "CycloneDX SBOM validated successfully"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-sbom-cyclonedx
+          path: sbom-output/sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
