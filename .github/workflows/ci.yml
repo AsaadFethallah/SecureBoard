@@ -482,3 +482,42 @@ jobs:
           path: cosign-output/secureboard-api.tar.sigstore.json
           if-no-files-found: error
           retention-days: 30
+
+
+  provenance:
+    name: Verify build provenance
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download canonical SecureBoard image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify canonical artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Generate build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: secureboard-api.tar
+
+      - name: Verify build provenance attestation
+        run: |
+          gh attestation verify \
+            secureboard-api.tar \
+            --repo "$GITHUB_REPOSITORY"
