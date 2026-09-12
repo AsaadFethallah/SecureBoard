@@ -1,20 +1,12 @@
-import os
 from collections.abc import Generator
 
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from app.core.config import read_secret
 
-load_dotenv()
 
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL environment variable is not configured"
-    )
+DATABASE_URL = read_secret("DATABASE_URL")
 
 
 engine = create_engine(

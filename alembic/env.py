@@ -1,63 +1,61 @@
-import os
 from logging.config import fileConfig
 
 from alembic import context
-from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
 
-from app.core.database import Base
-from app.models import Project, User
+from app.core.database import Base, DATABASE_URL
+
+# Import models so Alembic can discover their metadata
+# when using --autogenerate.
+import app.models  # noqa: F401
 
 
-# Load environment variables from .env
-load_dotenv()
-
-
-# Alembic Config object.
+# Alembic Config object, which provides access
+# to values within alembic.ini.
 config = context.config
 
 
-# Read DATABASE_URL from the environment instead of storing
-# database credentials inside alembic.ini.
-database_url = os.getenv("DATABASE_URL")
-
-if not database_url:
-    raise RuntimeError(
-        "DATABASE_URL environment variable is not configured"
-    )
-
+# DATABASE_URL is resolved by app.core.database.
+#
+# It supports:
+#   DATABASE_URL
+# or:
+#   DATABASE_URL_FILE
+#
+# The replace is important because Alembic/ConfigParser
+# interprets "%" as interpolation syntax.
 config.set_main_option(
     "sqlalchemy.url",
-    database_url,
+    DATABASE_URL.replace("%", "%%"),
 )
 
 
-# Configure Python logging using alembic.ini.
+# Configure Python logging from alembic.ini.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
 # SQLAlchemy metadata used by Alembic autogenerate.
-#
-# Importing Project and User above registers their tables
-# with Base.metadata.
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
     """
-    Run migrations in offline mode.
+    Run migrations in 'offline' mode.
 
-    Alembic generates SQL without creating a live
-    database connection.
+    In this mode Alembic does not create a database connection.
+    SQL statements are generated using only the configured URL.
     """
+
     url = config.get_main_option("sqlalchemy.url")
 
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
+        dialect_opts={
+            "paramstyle": "named",
+        },
         compare_type=True,
     )
 
@@ -67,15 +65,15 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """
-    Run migrations in online mode.
+    Run migrations in 'online' mode.
 
-    Alembic connects directly to PostgreSQL and
-    executes the migrations.
+    In this mode Alembic creates a SQLAlchemy engine
+    and connects directly to PostgreSQL.
     """
+
     connectable = engine_from_config(
         config.get_section(
             config.config_ini_section,
-            {}
         ),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,

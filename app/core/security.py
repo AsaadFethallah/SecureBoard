@@ -2,22 +2,23 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from dotenv import load_dotenv
 from jwt.exceptions import InvalidTokenError
 from pwdlib import PasswordHash
 
+from app.core.config import read_secret
 
-load_dotenv()
 
-
-JWT_SECRET = os.getenv("JWT_SECRET")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(
-    os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
+JWT_SECRET = read_secret("JWT_SECRET")
+JWT_ALGORITHM = os.getenv(
+    "JWT_ALGORITHM",
+    "HS256",
 )
-
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET environment variable is not configured")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(
+    os.getenv(
+        "ACCESS_TOKEN_EXPIRE_MINUTES",
+        "30",
+    )
+)
 
 
 password_hash = PasswordHash.recommended()

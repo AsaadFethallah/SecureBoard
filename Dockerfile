@@ -19,7 +19,11 @@ COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini .
 
-RUN useradd --create-home --shell /usr/sbin/nologin secureboard \
+RUN useradd \
+      --uid 10001 \
+      --create-home \
+      --shell /usr/sbin/nologin \
+      secureboard \
     && chown -R secureboard:secureboard /app
 
 USER secureboard
