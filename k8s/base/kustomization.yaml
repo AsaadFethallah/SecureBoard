@@ -4,5 +4,6 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - postgres.yaml
+  - migrations.yaml
   - api.yaml
   - network-policies.yaml

@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: secureboard-db-migrate
+  namespace: secureboard
+
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+
+  template:
+    metadata:
+      labels:
+        app: secureboard-migrations
+
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: migrations
+          image: secureboard-api:base
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - alembic
+            - upgrade
+            - head
+
+          env:
+            - name: DATABASE_URL_FILE
+              value: /run/secrets/secureboard/DATABASE_URL
+
+            - name: HOME
+              value: /tmp
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+            - name: secureboard-secrets
+              mountPath: /run/secrets/secureboard
+              readOnly: true
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+        - name: secureboard-secrets
+          secret:
+            secretName: secureboard-secrets
+            defaultMode: 0440
+
+            items:
+              - key: DATABASE_URL
+                path: DATABASE_URL

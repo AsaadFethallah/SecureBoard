@@ -870,7 +870,7 @@ jobs:
           kubectl version \
             --client
 
-      - name: Render production Kubernetes manifest
+      - name: Render production Kubernetes manifests
         run: |
           set -euo pipefail
 
@@ -878,72 +878,162 @@ jobs:
             /tmp/secureboard-k8s/overlays/prod \
             > secureboard-prod.yaml
 
+          kubectl kustomize \
+            /tmp/secureboard-k8s/overlays/prod-migration \
+            > secureboard-prod-migration.yaml
+
+          kubectl kustomize \
+            /tmp/secureboard-k8s/overlays/prod-application \
+            > secureboard-prod-application.yaml
+
           test -s secureboard-prod.yaml
+          test -s secureboard-prod-migration.yaml
+          test -s secureboard-prod-application.yaml
 
-          echo "Production Kubernetes manifest rendered"
+          echo "Production manifests rendered successfully"
 
-      - name: Bind rendered manifest to authorized image
+      - name: Bind rendered manifests to authorized image
         run: |
           set -euo pipefail
 
           EXPECTED_IMAGE="ghcr.io/asaadfethallah/secureboard@${IMAGE_DIGEST}"
 
-          IMAGE_COUNT=$(grep -F -c \
+          FULL_COUNT=$(grep -F -c \
             "image: ${EXPECTED_IMAGE}" \
             secureboard-prod.yaml || true)
 
-          echo "Authorized image occurrences:"
-          echo "$IMAGE_COUNT"
+          MIGRATION_COUNT=$(grep -F -c \
+            "image: ${EXPECTED_IMAGE}" \
+            secureboard-prod-migration.yaml || true)
 
-          if [ "$IMAGE_COUNT" -ne 2 ]; then
-            echo "Deployment denied: expected authorized image exactly twice"
-            echo "Expected one API container and one migration initContainer"
+          APPLICATION_COUNT=$(grep -F -c \
+            "image: ${EXPECTED_IMAGE}" \
+            secureboard-prod-application.yaml || true)
+
+          echo "Full manifest image count:        $FULL_COUNT"
+          echo "Migration manifest image count:   $MIGRATION_COUNT"
+          echo "Application manifest image count: $APPLICATION_COUNT"
+
+          if [ "$FULL_COUNT" -ne 2 ]; then
+            echo "Deployment denied: full manifest must contain the authorized image exactly twice"
             exit 1
           fi
 
-          if grep -Eq \
-            'secureboard-api:k8s-local|secureboard-api:base|replace-by-ci' \
-            secureboard-prod.yaml; then
-
-            echo "Deployment denied: development image reference found in production manifest"
+          if [ "$MIGRATION_COUNT" -ne 1 ]; then
+            echo "Deployment denied: migration manifest must contain the authorized image exactly once"
             exit 1
           fi
 
-          if grep -Fq \
-            'sha256:0000000000000000000000000000000000000000000000000000000000000000' \
-            secureboard-prod.yaml; then
-
-            echo "Deployment denied: placeholder digest found in production manifest"
+          if [ "$APPLICATION_COUNT" -ne 1 ]; then
+            echo "Deployment denied: application manifest must contain the authorized image exactly once"
             exit 1
           fi
 
-          echo "Rendered manifest is bound to authorized immutable image"
+          for MANIFEST in \
+            secureboard-prod.yaml \
+            secureboard-prod-migration.yaml \
+            secureboard-prod-application.yaml
+          do
+            if grep -Eq \
+              'secureboard-api:k8s-local|secureboard-api:base|replace-by-ci' \
+              "$MANIFEST"; then
+
+              echo "Deployment denied: development image reference found in $MANIFEST"
+              exit 1
+            fi
+
+            if grep -Fq \
+              'sha256:0000000000000000000000000000000000000000000000000000000000000000' \
+              "$MANIFEST"; then
+
+              echo "Deployment denied: placeholder digest found in $MANIFEST"
+              exit 1
+            fi
+          done
+
+          echo "All manifests are bound to the authorized immutable image"
+
+      - name: Enforce phased deployment topology
+        run: |
+          set -euo pipefail
+
+          MIGRATION_RESOURCES=$(kubectl create \
+            --dry-run=client \
+            -f secureboard-prod-migration.yaml \
+            -o name)
+
+          APPLICATION_RESOURCES=$(kubectl create \
+            --dry-run=client \
+            -f secureboard-prod-application.yaml \
+            -o name)
+
+          echo "Migration phase resources:"
+          echo "$MIGRATION_RESOURCES"
+
+          echo
+          echo "Application phase resources:"
+          echo "$APPLICATION_RESOURCES"
+
+          if echo "$MIGRATION_RESOURCES" \
+            | grep -Fxq 'deployment.apps/secureboard-api'; then
+
+            echo "Deployment denied: API Deployment exists in migration phase"
+            exit 1
+          fi
+
+          if ! echo "$MIGRATION_RESOURCES" \
+            | grep -Fxq 'job.batch/secureboard-db-migrate'; then
+
+            echo "Deployment denied: migration Job missing from migration phase"
+            exit 1
+          fi
+
+          if ! echo "$APPLICATION_RESOURCES" \
+            | grep -Fxq 'deployment.apps/secureboard-api'; then
+
+            echo "Deployment denied: API Deployment missing from application phase"
+            exit 1
+          fi
+
+          if echo "$APPLICATION_RESOURCES" \
+            | grep -Fxq 'job.batch/secureboard-db-migrate'; then
+
+            echo "Deployment denied: migration Job exists in application phase"
+            exit 1
+          fi
+
+          echo "Phased deployment topology accepted"
 
       - name: Enforce Checkov exception budget
         run: |
           set -euo pipefail
 
-          SKIP_COUNT=$(grep -c \
-            'checkov.io/skip' \
-            secureboard-prod.yaml || true)
+          for MANIFEST in \
+            secureboard-prod.yaml \
+            secureboard-prod-migration.yaml \
+            secureboard-prod-application.yaml
+          do
+            SKIP_COUNT=$(grep -c \
+              'checkov.io/skip' \
+              "$MANIFEST" || true)
 
-          echo "Documented Checkov exceptions:"
-          echo "$SKIP_COUNT"
+            echo "$MANIFEST documented Checkov exceptions: $SKIP_COUNT"
 
-          if [ "$SKIP_COUNT" -ne 1 ]; then
-            echo "Deployment denied: unexpected number of Checkov exceptions"
-            exit 1
-          fi
+            if [ "$SKIP_COUNT" -ne 1 ]; then
+              echo "Deployment denied: unexpected Checkov exception count in $MANIFEST"
+              exit 1
+            fi
 
-          if ! grep -Fq \
-            'CKV_K8S_40=' \
-            secureboard-prod.yaml; then
+            if ! grep -Fq \
+              'CKV_K8S_40=' \
+              "$MANIFEST"; then
 
-            echo "Deployment denied: expected PostgreSQL UID exception is missing"
-            exit 1
-          fi
+              echo "Deployment denied: expected PostgreSQL UID exception missing from $MANIFEST"
+              exit 1
+            fi
+          done
 
-          echo "Checkov exception budget accepted"
+          echo "Checkov exception budget accepted for all manifests"
 
       - name: Pull Checkov image
         run: |
@@ -953,36 +1043,58 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker run --rm \
-            -v "$PWD:/work:ro" \
-            "$CHECKOV_IMAGE" \
-            -f /work/secureboard-prod.yaml \
-            --framework kubernetes
+          for MANIFEST in \
+            secureboard-prod.yaml \
+            secureboard-prod-migration.yaml \
+            secureboard-prod-application.yaml
+          do
+            echo "=========================================="
+            echo "Checkov: $MANIFEST"
+            echo "=========================================="
 
-      - name: Generate production manifest integrity record
+            docker run --rm \
+              -v "$PWD:/work:ro" \
+              "$CHECKOV_IMAGE" \
+              -f "/work/${MANIFEST}" \
+              --framework kubernetes
+          done
+
+      - name: Generate production manifest integrity records
         run: |
           set -euo pipefail
 
           sha256sum \
             secureboard-prod.yaml \
-            > secureboard-prod.yaml.sha256
+            secureboard-prod-migration.yaml \
+            secureboard-prod-application.yaml \
+            > secureboard-production-manifests.sha256
 
-          MANIFEST_SHA256=$(cut -d ' ' -f1 \
-            secureboard-prod.yaml.sha256)
+          PROD_MANIFEST_SHA256=$(awk \
+            '$2 == "secureboard-prod.yaml" { print $1 }' \
+            secureboard-production-manifests.sha256)
 
-          echo "PROD_MANIFEST_SHA256=$MANIFEST_SHA256" \
+          if ! echo "$PROD_MANIFEST_SHA256" \
+            | grep -Eq '^[a-f0-9]{64}$'; then
+
+            echo "Deployment denied: production manifest hash could not be generated"
+            exit 1
+          fi
+
+          echo "PROD_MANIFEST_SHA256=$PROD_MANIFEST_SHA256" \
             >> "$GITHUB_ENV"
 
-          echo "Production manifest SHA256:"
-          echo "$MANIFEST_SHA256"
+          echo "Production manifest integrity records:"
+          cat secureboard-production-manifests.sha256
 
-      - name: Upload authorized production manifest
+      - name: Upload authorized production manifests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: secureboard-production-manifest
+          name: secureboard-production-manifests
           path: |
             secureboard-prod.yaml
-            secureboard-prod.yaml.sha256
+            secureboard-prod-migration.yaml
+            secureboard-prod-application.yaml
+            secureboard-production-manifests.sha256
           if-no-files-found: error
           retention-days: 30
 

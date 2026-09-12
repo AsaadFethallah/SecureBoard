@@ -12,16 +12,12 @@ spec:
     - Ingress
     - Egress
 
-  # The API is intentionally reachable on its application port.
-  # Exposure outside the cluster is still controlled separately
-  # by Kubernetes Services / Ingress.
   ingress:
     - ports:
         - protocol: TCP
           port: 8000
 
   egress:
-    # Allow DNS resolution through CoreDNS.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -35,8 +31,48 @@ spec:
         - protocol: TCP
           port: 53
 
-    # SecureBoard API may connect only to PostgreSQL
-    # on the PostgreSQL application port.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: secureboard-migrations-network-policy
+  namespace: secureboard
+spec:
+  podSelector:
+    matchLabels:
+      app: secureboard-migrations
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Migration Pods never need inbound connections.
+  ingress: []
+
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Database only
     - to:
         - podSelector:
             matchLabels:
@@ -60,16 +96,18 @@ spec:
     - Ingress
     - Egress
 
-  # PostgreSQL accepts connections only from SecureBoard API.
   ingress:
     - from:
         - podSelector:
             matchLabels:
               app: secureboard-api
+
+        - podSelector:
+            matchLabels:
+              app: secureboard-migrations
+
       ports:
         - protocol: TCP
           port: 5432
 
-  # PostgreSQL currently does not need to initiate
-  # connections to other Pods or external services.
   egress: []

@@ -58,49 +58,6 @@ spec:
         seccompProfile:
           type: RuntimeDefault
 
-      initContainers:
-        - name: database-migrations
-          image: secureboard-api:base
-          imagePullPolicy: IfNotPresent
-
-          command:
-            - alembic
-            - upgrade
-            - head
-
-          env:
-            - name: DATABASE_URL_FILE
-              value: /run/secrets/secureboard/DATABASE_URL
-
-            - name: HOME
-              value: /tmp
-
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-
-            limits:
-              cpu: "250m"
-              memory: "256Mi"
-
-          securityContext:
-            privileged: false
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-
-            capabilities:
-              drop:
-                - ALL
-
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-
-            - name: secureboard-secrets
-              mountPath: /run/secrets/secureboard
-              readOnly: true
-
       containers:
         - name: api
           image: secureboard-api:base

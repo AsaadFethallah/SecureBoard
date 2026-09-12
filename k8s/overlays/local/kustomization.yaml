@@ -23,9 +23,23 @@ patches:
       spec:
         template:
           spec:
-            initContainers:
-              - name: database-migrations
-                imagePullPolicy: Never
             containers:
               - name: api
+                imagePullPolicy: Never
+
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      name: secureboard-db-migrate
+    patch: |-
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: secureboard-db-migrate
+      spec:
+        template:
+          spec:
+            containers:
+              - name: migrations
                 imagePullPolicy: Never

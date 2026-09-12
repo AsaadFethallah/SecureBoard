@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../prod
+
+patches:
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      name: secureboard-db-migrate
+    patch: |-
+      $patch: delete
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: secureboard-db-migrate
