@@ -538,6 +538,11 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
+
+    outputs:
+      image_ref: ${{ steps.image_identity.outputs.image_ref }}
+      image_digest: ${{ steps.image_identity.outputs.image_digest }}
 
     env:
       GHCR_IMAGE: ghcr.io/asaadfethallah/secureboard
@@ -603,6 +608,7 @@ jobs:
           docker push "$IMAGE_TAG"
 
       - name: Resolve immutable registry digest
+        id: image_identity
         run: |
           MANIFEST_JSON=$(docker buildx imagetools inspect \
             "$IMAGE_TAG" \
@@ -627,6 +633,17 @@ jobs:
 
           echo "IMAGE_DIGEST=$DIGEST" >> "$GITHUB_ENV"
           echo "IMAGE_REF=$IMAGE_REF" >> "$GITHUB_ENV"
+
+          echo "image_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Generate OCI build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.image_identity.outputs.image_digest }}
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Pull pinned Cosign image
         run: |
@@ -676,6 +693,113 @@ jobs:
           echo "$IMAGE_DIGEST"
           echo
           echo "Deploy using immutable reference:"
+          echo "$IMAGE_REF"
+          echo "=========================================="
+
+      - name: Log out from GHCR
+        if: always()
+        run: |
+          docker logout ghcr.io || true
+
+
+  deployment_policy:
+    name: Enforce deployment trust policy
+
+    runs-on: ubuntu-latest
+
+    if: github.event_name == 'push'
+
+    needs:
+      - publish_image
+
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+
+    env:
+      IMAGE_REF: ${{ needs.publish_image.outputs.image_ref }}
+      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8
+      GHCR_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Validate immutable image reference
+        run: |
+          echo "Candidate deployment image:"
+          echo "$IMAGE_REF"
+
+          if ! echo "$IMAGE_REF" \
+            | grep -Eq '^ghcr\.io/asaadfethallah/secureboard@sha256:[a-f0-9]{64}$'; then
+            echo "Deployment denied: image is not an approved immutable digest reference"
+            exit 1
+          fi
+
+          echo "Immutable image reference accepted"
+
+      - name: Log in to GHCR
+        run: |
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io \
+                --username "$GITHUB_ACTOR" \
+                --password-stdin
+
+      - name: Pull pinned Cosign image
+        run: |
+          docker pull "$COSIGN_IMAGE"
+
+      - name: Enforce Cosign signature policy
+        run: |
+          CERTIFICATE_IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
+
+          echo "Required Cosign identity:"
+          echo "$CERTIFICATE_IDENTITY"
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e DOCKER_CONFIG=/docker-config \
+            -v "$HOME/.docker:/docker-config:ro" \
+            "$COSIGN_IMAGE" \
+            verify \
+            "$IMAGE_REF" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Enforce provenance policy
+        run: |
+          echo "Required source repository:"
+          echo "$GITHUB_REPOSITORY"
+
+          echo "Required source commit:"
+          echo "$GITHUB_SHA"
+
+          echo "Required source ref:"
+          echo "$GITHUB_REF"
+
+          gh attestation verify \
+            "oci://${IMAGE_REF}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle-from-oci \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF"
+
+      - name: Authorize deployment
+        run: |
+          echo "=========================================="
+          echo "SECUREBOARD DEPLOYMENT POLICY"
+          echo "=========================================="
+          echo "Immutable digest:       PASS"
+          echo "Cosign signature:       PASS"
+          echo "Expected OIDC identity: PASS"
+          echo "Build provenance:       PASS"
+          echo "Repository identity:    PASS"
+          echo "Source commit:          PASS"
+          echo "Source ref:             PASS"
+          echo
+          echo "DEPLOYMENT AUTHORIZED"
+          echo
           echo "$IMAGE_REF"
           echo "=========================================="
 
