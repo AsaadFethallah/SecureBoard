@@ -879,6 +879,10 @@ jobs:
             > secureboard-prod.yaml
 
           kubectl kustomize \
+            /tmp/secureboard-k8s/overlays/prod-foundation \
+            > secureboard-prod-foundation.yaml
+
+          kubectl kustomize \
             /tmp/secureboard-k8s/overlays/prod-migration \
             > secureboard-prod-migration.yaml
 
@@ -886,9 +890,14 @@ jobs:
             /tmp/secureboard-k8s/overlays/prod-application \
             > secureboard-prod-application.yaml
 
-          test -s secureboard-prod.yaml
-          test -s secureboard-prod-migration.yaml
-          test -s secureboard-prod-application.yaml
+          for MANIFEST in \
+            secureboard-prod.yaml \
+            secureboard-prod-foundation.yaml \
+            secureboard-prod-migration.yaml \
+            secureboard-prod-application.yaml
+          do
+            test -s "$MANIFEST"
+          done
 
           echo "Production manifests rendered successfully"
 
@@ -902,6 +911,10 @@ jobs:
             "image: ${EXPECTED_IMAGE}" \
             secureboard-prod.yaml || true)
 
+          FOUNDATION_COUNT=$(grep -F -c \
+            "image: ${EXPECTED_IMAGE}" \
+            secureboard-prod-foundation.yaml || true)
+
           MIGRATION_COUNT=$(grep -F -c \
             "image: ${EXPECTED_IMAGE}" \
             secureboard-prod-migration.yaml || true)
@@ -910,27 +923,34 @@ jobs:
             "image: ${EXPECTED_IMAGE}" \
             secureboard-prod-application.yaml || true)
 
-          echo "Full manifest image count:        $FULL_COUNT"
-          echo "Migration manifest image count:   $MIGRATION_COUNT"
-          echo "Application manifest image count: $APPLICATION_COUNT"
+          echo "Full image count:        $FULL_COUNT"
+          echo "Foundation image count:  $FOUNDATION_COUNT"
+          echo "Migration image count:   $MIGRATION_COUNT"
+          echo "Application image count: $APPLICATION_COUNT"
 
           if [ "$FULL_COUNT" -ne 2 ]; then
             echo "Deployment denied: full manifest must contain the authorized image exactly twice"
             exit 1
           fi
 
+          if [ "$FOUNDATION_COUNT" -ne 0 ]; then
+            echo "Deployment denied: foundation must not contain the SecureBoard application image"
+            exit 1
+          fi
+
           if [ "$MIGRATION_COUNT" -ne 1 ]; then
-            echo "Deployment denied: migration manifest must contain the authorized image exactly once"
+            echo "Deployment denied: migration phase must contain the authorized image exactly once"
             exit 1
           fi
 
           if [ "$APPLICATION_COUNT" -ne 1 ]; then
-            echo "Deployment denied: application manifest must contain the authorized image exactly once"
+            echo "Deployment denied: application phase must contain the authorized image exactly once"
             exit 1
           fi
 
           for MANIFEST in \
             secureboard-prod.yaml \
+            secureboard-prod-foundation.yaml \
             secureboard-prod-migration.yaml \
             secureboard-prod-application.yaml
           do
@@ -951,7 +971,7 @@ jobs:
             fi
           done
 
-          echo "All manifests are bound to the authorized immutable image"
+          echo "All manifests are bound to the authorized immutable release"
 
       - name: Enforce phased deployment topology
         run: |
@@ -986,58 +1006,81 @@ jobs:
             ' "$1"
           }
 
-          MIGRATION_RESOURCES=$(resource_list \
+          FOUNDATION=$(resource_list \
+            secureboard-prod-foundation.yaml)
+
+          MIGRATION=$(resource_list \
             secureboard-prod-migration.yaml)
 
-          APPLICATION_RESOURCES=$(resource_list \
+          APPLICATION=$(resource_list \
             secureboard-prod-application.yaml)
 
-          echo "Migration phase resources:"
-          echo "$MIGRATION_RESOURCES"
+          count_resource() {
+            printf '%s\n' "$1" \
+              | grep -Fxc "$2" || true
+          }
 
-          echo
-          echo "Application phase resources:"
-          echo "$APPLICATION_RESOURCES"
+          FOUNDATION_POSTGRES=$(count_resource \
+            "$FOUNDATION" \
+            'Deployment/postgres')
 
-          MIGRATION_API_COUNT=$(printf '%s\n' \
-            "$MIGRATION_RESOURCES" \
-            | grep -Fxc 'Deployment/secureboard-api' || true)
+          FOUNDATION_API=$(count_resource \
+            "$FOUNDATION" \
+            'Deployment/secureboard-api')
 
-          MIGRATION_JOB_COUNT=$(printf '%s\n' \
-            "$MIGRATION_RESOURCES" \
-            | grep -Fxc 'Job/secureboard-db-migrate' || true)
+          FOUNDATION_JOB=$(count_resource \
+            "$FOUNDATION" \
+            'Job/secureboard-db-migrate')
 
-          APPLICATION_API_COUNT=$(printf '%s\n' \
-            "$APPLICATION_RESOURCES" \
-            | grep -Fxc 'Deployment/secureboard-api' || true)
+          MIGRATION_POSTGRES=$(count_resource \
+            "$MIGRATION" \
+            'Deployment/postgres')
 
-          APPLICATION_JOB_COUNT=$(printf '%s\n' \
-            "$APPLICATION_RESOURCES" \
-            | grep -Fxc 'Job/secureboard-db-migrate' || true)
+          MIGRATION_API=$(count_resource \
+            "$MIGRATION" \
+            'Deployment/secureboard-api')
 
-          echo
-          echo "Migration API count:      $MIGRATION_API_COUNT"
-          echo "Migration Job count:      $MIGRATION_JOB_COUNT"
-          echo "Application API count:    $APPLICATION_API_COUNT"
-          echo "Application Job count:    $APPLICATION_JOB_COUNT"
+          MIGRATION_JOB=$(count_resource \
+            "$MIGRATION" \
+            'Job/secureboard-db-migrate')
 
-          if [ "$MIGRATION_API_COUNT" -ne 0 ]; then
-            echo "Deployment denied: API Deployment exists in migration phase"
+          APPLICATION_POSTGRES=$(count_resource \
+            "$APPLICATION" \
+            'Deployment/postgres')
+
+          APPLICATION_API=$(count_resource \
+            "$APPLICATION" \
+            'Deployment/secureboard-api')
+
+          APPLICATION_JOB=$(count_resource \
+            "$APPLICATION" \
+            'Job/secureboard-db-migrate')
+
+          echo "Foundation:  postgres=$FOUNDATION_POSTGRES api=$FOUNDATION_API migration=$FOUNDATION_JOB"
+          echo "Migration:   postgres=$MIGRATION_POSTGRES api=$MIGRATION_API migration=$MIGRATION_JOB"
+          echo "Application: postgres=$APPLICATION_POSTGRES api=$APPLICATION_API migration=$APPLICATION_JOB"
+
+          if [ "$FOUNDATION_POSTGRES" -ne 1 ] \
+            || [ "$FOUNDATION_API" -ne 0 ] \
+            || [ "$FOUNDATION_JOB" -ne 0 ]; then
+
+            echo "Deployment denied: invalid foundation topology"
             exit 1
           fi
 
-          if [ "$MIGRATION_JOB_COUNT" -ne 1 ]; then
-            echo "Deployment denied: migration phase must contain exactly one migration Job"
+          if [ "$MIGRATION_POSTGRES" -ne 0 ] \
+            || [ "$MIGRATION_API" -ne 0 ] \
+            || [ "$MIGRATION_JOB" -ne 1 ]; then
+
+            echo "Deployment denied: invalid migration topology"
             exit 1
           fi
 
-          if [ "$APPLICATION_API_COUNT" -ne 1 ]; then
-            echo "Deployment denied: application phase must contain exactly one API Deployment"
-            exit 1
-          fi
+          if [ "$APPLICATION_POSTGRES" -ne 0 ] \
+            || [ "$APPLICATION_API" -ne 1 ] \
+            || [ "$APPLICATION_JOB" -ne 0 ]; then
 
-          if [ "$APPLICATION_JOB_COUNT" -ne 0 ]; then
-            echo "Deployment denied: migration Job exists in application phase"
+            echo "Deployment denied: invalid application topology"
             exit 1
           fi
 
@@ -1047,22 +1090,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          for MANIFEST in \
-            secureboard-prod.yaml \
-            secureboard-prod-migration.yaml \
-            secureboard-prod-application.yaml
-          do
-            SKIP_COUNT=$(grep -c \
+          check_budget() {
+            MANIFEST="$1"
+            EXPECTED="$2"
+
+            ACTUAL=$(grep -c \
               'checkov.io/skip' \
               "$MANIFEST" || true)
 
-            echo "$MANIFEST documented Checkov exceptions: $SKIP_COUNT"
+            echo "$MANIFEST exceptions: $ACTUAL (expected $EXPECTED)"
 
-            if [ "$SKIP_COUNT" -ne 1 ]; then
+            if [ "$ACTUAL" -ne "$EXPECTED" ]; then
               echo "Deployment denied: unexpected Checkov exception count in $MANIFEST"
               exit 1
             fi
+          }
 
+          check_budget secureboard-prod.yaml 1
+          check_budget secureboard-prod-foundation.yaml 1
+          check_budget secureboard-prod-migration.yaml 0
+          check_budget secureboard-prod-application.yaml 0
+
+          for MANIFEST in \
+            secureboard-prod.yaml \
+            secureboard-prod-foundation.yaml
+          do
             if ! grep -Fq \
               'CKV_K8S_40=' \
               "$MANIFEST"; then
@@ -1072,7 +1124,7 @@ jobs:
             fi
           done
 
-          echo "Checkov exception budget accepted for all manifests"
+          echo "Checkov exception budgets accepted"
 
       - name: Pull Checkov image
         run: |
@@ -1084,6 +1136,7 @@ jobs:
 
           for MANIFEST in \
             secureboard-prod.yaml \
+            secureboard-prod-foundation.yaml \
             secureboard-prod-migration.yaml \
             secureboard-prod-application.yaml
           do
@@ -1104,23 +1157,49 @@ jobs:
 
           sha256sum \
             secureboard-prod.yaml \
+            secureboard-prod-foundation.yaml \
             secureboard-prod-migration.yaml \
             secureboard-prod-application.yaml \
             > secureboard-production-manifests.sha256
 
-          PROD_MANIFEST_SHA256=$(awk \
-            '$2 == "secureboard-prod.yaml" { print $1 }' \
-            secureboard-production-manifests.sha256)
+          read_hash() {
+            awk -v file="$1" \
+              '$2 == file { print $1 }' \
+              secureboard-production-manifests.sha256
+          }
 
-          if ! echo "$PROD_MANIFEST_SHA256" \
-            | grep -Eq '^[a-f0-9]{64}$'; then
+          PROD_MANIFEST_SHA256=$(read_hash \
+            secureboard-prod.yaml)
 
-            echo "Deployment denied: production manifest hash could not be generated"
-            exit 1
-          fi
+          FOUNDATION_MANIFEST_SHA256=$(read_hash \
+            secureboard-prod-foundation.yaml)
 
-          echo "PROD_MANIFEST_SHA256=$PROD_MANIFEST_SHA256" \
-            >> "$GITHUB_ENV"
+          MIGRATION_MANIFEST_SHA256=$(read_hash \
+            secureboard-prod-migration.yaml)
+
+          APPLICATION_MANIFEST_SHA256=$(read_hash \
+            secureboard-prod-application.yaml)
+
+          for HASH in \
+            "$PROD_MANIFEST_SHA256" \
+            "$FOUNDATION_MANIFEST_SHA256" \
+            "$MIGRATION_MANIFEST_SHA256" \
+            "$APPLICATION_MANIFEST_SHA256"
+          do
+            if ! printf '%s\n' "$HASH" \
+              | grep -Eq '^[a-f0-9]{64}$'; then
+
+              echo "Deployment denied: invalid production manifest hash"
+              exit 1
+            fi
+          done
+
+          {
+            echo "PROD_MANIFEST_SHA256=$PROD_MANIFEST_SHA256"
+            echo "FOUNDATION_MANIFEST_SHA256=$FOUNDATION_MANIFEST_SHA256"
+            echo "MIGRATION_MANIFEST_SHA256=$MIGRATION_MANIFEST_SHA256"
+            echo "APPLICATION_MANIFEST_SHA256=$APPLICATION_MANIFEST_SHA256"
+          } >> "$GITHUB_ENV"
 
           echo "Production manifest integrity records:"
           cat secureboard-production-manifests.sha256
@@ -1131,6 +1210,7 @@ jobs:
           name: secureboard-production-manifests
           path: |
             secureboard-prod.yaml
+            secureboard-prod-foundation.yaml
             secureboard-prod-migration.yaml
             secureboard-prod-application.yaml
             secureboard-production-manifests.sha256
