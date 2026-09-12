@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secureboard-api-config
+  namespace: secureboard
+data:
+  JWT_ALGORITHM: "HS256"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: secureboard-api
+  namespace: secureboard
+spec:
+  type: ClusterIP
+
+  selector:
+    app: secureboard-api
+
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secureboard-api
+  namespace: secureboard
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: secureboard-api
+
+  template:
+    metadata:
+      labels:
+        app: secureboard-api
+
+    spec:
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        - name: database-migrations
+          image: secureboard-api:base
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - alembic
+            - upgrade
+            - head
+
+          env:
+            - name: DATABASE_URL_FILE
+              value: /run/secrets/secureboard/DATABASE_URL
+
+            - name: HOME
+              value: /tmp
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+            - name: secureboard-secrets
+              mountPath: /run/secrets/secureboard
+              readOnly: true
+
+      containers:
+        - name: api
+          image: secureboard-api:base
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          env:
+            - name: DATABASE_URL_FILE
+              value: /run/secrets/secureboard/DATABASE_URL
+
+            - name: JWT_SECRET_FILE
+              value: /run/secrets/secureboard/JWT_SECRET
+
+            - name: JWT_ALGORITHM
+              valueFrom:
+                configMapKeyRef:
+                  name: secureboard-api-config
+                  key: JWT_ALGORITHM
+
+            - name: ACCESS_TOKEN_EXPIRE_MINUTES
+              valueFrom:
+                configMapKeyRef:
+                  name: secureboard-api-config
+                  key: ACCESS_TOKEN_EXPIRE_MINUTES
+
+            - name: HOME
+              value: /tmp
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+            - name: secureboard-secrets
+              mountPath: /run/secrets/secureboard
+              readOnly: true
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+        - name: secureboard-secrets
+          secret:
+            secretName: secureboard-secrets
+            defaultMode: 0440
+
+            items:
+              - key: DATABASE_URL
+                path: DATABASE_URL
+
+              - key: JWT_SECRET
+                path: JWT_SECRET

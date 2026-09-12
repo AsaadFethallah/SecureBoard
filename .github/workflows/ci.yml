@@ -1,0 +1,1019 @@
+name: SecureBoard CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run automated tests
+
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+
+        env:
+          POSTGRES_USER: secureboard
+          POSTGRES_PASSWORD: secureboard_ci_password
+          POSTGRES_DB: secureboard_test
+
+        ports:
+          - 5432:5432
+
+        options: >-
+          --health-cmd "pg_isready -U secureboard -d secureboard_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      JWT_SECRET: secureboard-ci-test-secret-not-for-production
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+
+      DATABASE_URL: postgresql+psycopg://secureboard:secureboard_ci_password@localhost:5432/secureboard_test
+      TEST_DATABASE_URL: postgresql+psycopg://secureboard:secureboard_ci_password@localhost:5432/secureboard_test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v5.6.0
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest -v
+
+
+  sast:
+    name: Semgrep SAST scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Run Semgrep
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            semgrep/semgrep \
+            semgrep scan \
+            --config=auto \
+            --error \
+            /src
+
+  
+  secrets:
+    name: Gitleaks secret scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git . \
+            --redact
+
+
+  sca:
+    name: Trivy dependency scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Run Trivy vulnerability scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            ghcr.io/aquasecurity/trivy:0.74.0 \
+            fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --no-progress \
+            .
+
+
+  build_image:
+    name: Build canonical SecureBoard image
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Build SecureBoard image
+        run: |
+          docker build \
+            --pull \
+            -t secureboard-api:ci \
+            .
+
+      - name: Record image identity
+        run: |
+          docker image inspect \
+            secureboard-api:ci \
+            --format '{{.Id}}' \
+            > image-id.txt
+
+          echo "Canonical image ID:"
+          cat image-id.txt
+
+      - name: Export canonical image
+        run: |
+          docker save \
+            secureboard-api:ci \
+            -o secureboard-api.tar
+
+          sha256sum secureboard-api.tar \
+            > secureboard-api.tar.sha256
+
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Upload canonical image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-container-image
+          path: |
+            secureboard-api.tar
+            secureboard-api.tar.sha256
+            image-id.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+
+  container_security:
+    name: Trivy container image scan
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+
+    steps:
+      - name: Download canonical image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify image artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Scan canonical container image
+        run: |
+          docker run --rm \
+            -v "$PWD:/work:ro" \
+            ghcr.io/aquasecurity/trivy:0.74.0 \
+            image \
+            --input /work/secureboard-api.tar \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress
+
+
+  iac:
+    name: Checkov IaC scan
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Run Checkov
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            bridgecrew/checkov:3.3.17 \
+            -d /repo/infra \
+            --framework terraform \
+            --compact
+
+
+  dast:
+    name: OWASP ZAP active DAST scan
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+
+    env:
+      POSTGRES_USER: secureboard
+      POSTGRES_PASSWORD: secureboard_dast_ci_password
+      POSTGRES_DB: secureboard
+
+      JWT_SECRET: secureboard-dast-ci-secret-not-for-production
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+
+      SECUREBOARD_IMAGE: secureboard-api:ci
+
+      ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Download canonical SecureBoard image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify canonical image artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Load canonical SecureBoard image
+        run: |
+          docker load \
+            -i secureboard-api.tar
+
+      - name: Verify canonical image identity
+        run: |
+          EXPECTED_IMAGE_ID=$(cat image-id.txt)
+
+          ACTUAL_IMAGE_ID=$(docker image inspect \
+            secureboard-api:ci \
+            --format '{{.Id}}')
+
+          echo "Expected image ID: $EXPECTED_IMAGE_ID"
+          echo "Actual image ID:   $ACTUAL_IMAGE_ID"
+
+          if [ "$EXPECTED_IMAGE_ID" != "$ACTUAL_IMAGE_ID" ]; then
+            echo "Canonical image identity verification failed"
+            exit 1
+          fi
+
+          echo "Canonical image identity verified"
+
+      - name: Start SecureBoard from canonical image
+        run: |
+          docker compose up -d --no-build
+
+      - name: Apply database migrations
+        run: |
+          docker compose exec -T api alembic upgrade head
+
+      - name: Wait for SecureBoard API
+        run: |
+          for i in {1..30}; do
+            if curl --fail --silent \
+              http://localhost:8000/health \
+              > /dev/null; then
+
+              echo "SecureBoard API is ready"
+              exit 0
+            fi
+
+            echo "Waiting for SecureBoard API..."
+            sleep 2
+          done
+
+          echo "SecureBoard API did not become ready"
+          docker compose logs
+          exit 1
+
+      - name: Pull pinned OWASP ZAP image
+        run: |
+          docker pull "$ZAP_IMAGE"
+
+      - name: Run OWASP ZAP active API scan
+        run: |
+          NETWORK=$(docker inspect secureboard-api \
+            --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}')
+
+          echo "Using Docker network: $NETWORK"
+
+          docker run --rm \
+            --network "$NETWORK" \
+            "$ZAP_IMAGE" \
+            zap-api-scan.py \
+            -t http://api:8000/openapi.json \
+            -f openapi \
+            -s
+
+      - name: Show application logs on failure
+        if: failure()
+        run: |
+          docker compose logs api
+
+      - name: Stop DAST environment
+        if: always()
+        run: |
+          docker compose down -v
+
+
+  sbom:
+    name: Generate CycloneDX SBOM
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+
+    env:
+      SYFT_IMAGE: anchore/syft@sha256:95fe0835e5bebc6f8b1f8acef68d47d63d594ef4c0f25c097ff853b23cbac74c
+
+    steps:
+      - name: Download canonical image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify image artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Pull pinned Syft image
+        run: |
+          docker pull "$SYFT_IMAGE"
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          mkdir -p sbom-output
+
+          docker run --rm \
+            -v "$PWD/secureboard-api.tar:/work/secureboard-api.tar:ro" \
+            -v "$PWD/sbom-output:/output" \
+            "$SYFT_IMAGE" \
+            docker-archive:/work/secureboard-api.tar \
+            -o cyclonedx-json=/output/sbom.cdx.json
+
+      - name: Validate SBOM
+        run: |
+          test -f sbom-output/sbom.cdx.json
+
+          test "$(jq -r '.bomFormat' sbom-output/sbom.cdx.json)" = "CycloneDX"
+
+          COMPONENTS=$(jq '.components | length' sbom-output/sbom.cdx.json)
+
+          echo "SBOM components: $COMPONENTS"
+
+          if [ "$COMPONENTS" -le 0 ]; then
+            echo "SBOM contains no components"
+            exit 1
+          fi
+
+          echo "CycloneDX SBOM validated successfully"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-sbom-cyclonedx
+          path: sbom-output/sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+
+  sign_artifact:
+    name: Cosign keyless artifact signing
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+      - test
+      - sast
+      - secrets
+      - sca
+      - container_security
+      - iac
+      - dast
+      - sbom
+      - provenance
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8
+
+    steps:
+      - name: Download canonical SecureBoard image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify canonical artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Pull pinned Cosign image
+        run: |
+          docker pull "$COSIGN_IMAGE"
+
+      - name: Sign canonical artifact with GitHub OIDC
+        run: |
+          mkdir -p cosign-output
+
+          touch cosign-output/secureboard-api.tar.sigstore.json
+          chmod 666 cosign-output/secureboard-api.tar.sigstore.json
+
+          docker run --rm \
+            -e ACTIONS_ID_TOKEN_REQUEST_URL \
+            -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -v "$PWD/secureboard-api.tar:/work/secureboard-api.tar:ro" \
+            -v "$PWD/cosign-output/secureboard-api.tar.sigstore.json:/output/secureboard-api.tar.sigstore.json" \
+            "$COSIGN_IMAGE" \
+            sign-blob \
+            --yes \
+            --bundle /output/secureboard-api.tar.sigstore.json \
+            /work/secureboard-api.tar
+
+      - name: Verify Cosign signature
+        run: |
+          CERTIFICATE_IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
+
+          echo "Expected signing identity:"
+          echo "$CERTIFICATE_IDENTITY"
+
+          docker run --rm \
+            -v "$PWD/secureboard-api.tar:/work/secureboard-api.tar:ro" \
+            -v "$PWD/cosign-output:/output:ro" \
+            "$COSIGN_IMAGE" \
+            verify-blob \
+            /work/secureboard-api.tar \
+            --bundle /output/secureboard-api.tar.sigstore.json \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Upload Sigstore signature bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-cosign-signature
+          path: cosign-output/secureboard-api.tar.sigstore.json
+          if-no-files-found: error
+          retention-days: 30
+
+
+  provenance:
+    name: Verify build provenance
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - build_image
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download canonical SecureBoard image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify canonical artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Generate build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: secureboard-api.tar
+
+      - name: Verify build provenance attestation
+        run: |
+          gh attestation verify \
+            secureboard-api.tar \
+            --repo "$GITHUB_REPOSITORY"
+
+
+  publish_image:
+    name: Publish and sign GHCR image
+
+    runs-on: ubuntu-latest
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    needs:
+      - sign_artifact
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    outputs:
+      image_ref: ${{ steps.image_identity.outputs.image_ref }}
+      image_digest: ${{ steps.image_identity.outputs.image_digest }}
+
+    env:
+      GHCR_IMAGE: ghcr.io/asaadfethallah/secureboard
+      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8
+      GHCR_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download canonical SecureBoard image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: secureboard-container-image
+          path: .
+
+      - name: Verify canonical artifact integrity
+        run: |
+          sha256sum -c secureboard-api.tar.sha256
+
+      - name: Load canonical SecureBoard image
+        run: |
+          docker load \
+            -i secureboard-api.tar
+
+      - name: Verify canonical image identity
+        run: |
+          EXPECTED_IMAGE_ID=$(cat image-id.txt)
+
+          ACTUAL_IMAGE_ID=$(docker image inspect \
+            secureboard-api:ci \
+            --format '{{.Id}}')
+
+          echo "Expected image ID: $EXPECTED_IMAGE_ID"
+          echo "Actual image ID:   $ACTUAL_IMAGE_ID"
+
+          if [ "$EXPECTED_IMAGE_ID" != "$ACTUAL_IMAGE_ID" ]; then
+            echo "Canonical image identity verification failed"
+            exit 1
+          fi
+
+          echo "Canonical image identity verified"
+
+      - name: Log in to GHCR
+        run: |
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io \
+                --username "$GITHUB_ACTOR" \
+                --password-stdin
+
+      - name: Tag canonical image
+        run: |
+          IMAGE_TAG="${GHCR_IMAGE}:sha-${GITHUB_SHA}"
+
+          docker tag \
+            secureboard-api:ci \
+            "$IMAGE_TAG"
+
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+          echo "Release tag:"
+          echo "$IMAGE_TAG"
+
+      - name: Push canonical image to GHCR
+        run: |
+          docker push "$IMAGE_TAG"
+
+      - name: Resolve immutable registry digest
+        id: image_identity
+        run: |
+          MANIFEST_JSON=$(docker buildx imagetools inspect \
+            "$IMAGE_TAG" \
+            --format '{{json .Manifest}}')
+
+          DIGEST=$(echo "$MANIFEST_JSON" \
+            | jq -r '.digest')
+
+          if ! echo "$DIGEST" \
+            | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+            echo "Invalid registry digest: $DIGEST"
+            exit 1
+          fi
+
+          IMAGE_REF="${GHCR_IMAGE}@${DIGEST}"
+
+          echo "Registry digest:"
+          echo "$DIGEST"
+
+          echo "Immutable image reference:"
+          echo "$IMAGE_REF"
+
+          echo "IMAGE_DIGEST=$DIGEST" >> "$GITHUB_ENV"
+          echo "IMAGE_REF=$IMAGE_REF" >> "$GITHUB_ENV"
+
+          echo "image_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Generate OCI build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.image_identity.outputs.image_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Pull pinned Cosign image
+        run: |
+          docker pull "$COSIGN_IMAGE"
+
+      - name: Sign immutable GHCR image with GitHub OIDC
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e ACTIONS_ID_TOKEN_REQUEST_URL \
+            -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            -e DOCKER_CONFIG=/docker-config \
+            -v "$HOME/.docker:/docker-config:ro" \
+            "$COSIGN_IMAGE" \
+            sign \
+            --yes \
+            "$IMAGE_REF"
+
+      - name: Verify GHCR image signature
+        run: |
+          CERTIFICATE_IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
+
+          echo "Expected signer identity:"
+          echo "$CERTIFICATE_IDENTITY"
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e DOCKER_CONFIG=/docker-config \
+            -v "$HOME/.docker:/docker-config:ro" \
+            "$COSIGN_IMAGE" \
+            verify \
+            "$IMAGE_REF" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Show signed release identity
+        run: |
+          echo "=========================================="
+          echo "SecureBoard signed container release"
+          echo "=========================================="
+          echo "Tag:"
+          echo "$IMAGE_TAG"
+          echo
+          echo "Digest:"
+          echo "$IMAGE_DIGEST"
+          echo
+          echo "Deploy using immutable reference:"
+          echo "$IMAGE_REF"
+          echo "=========================================="
+
+      - name: Log out from GHCR
+        if: always()
+        run: |
+          docker logout ghcr.io || true
+
+
+  deployment_policy:
+    name: Enforce deployment trust policy
+
+    runs-on: ubuntu-latest
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    needs:
+      - publish_image
+
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+
+    env:
+      IMAGE_REF: ${{ needs.publish_image.outputs.image_ref }}
+      IMAGE_DIGEST: ${{ needs.publish_image.outputs.image_digest }}
+
+      COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8
+      CHECKOV_IMAGE: bridgecrew/checkov:3.3.17
+
+      GHCR_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Validate immutable image identity
+        run: |
+          set -euo pipefail
+
+          echo "Candidate deployment image:"
+          echo "$IMAGE_REF"
+
+          echo
+          echo "Candidate deployment digest:"
+          echo "$IMAGE_DIGEST"
+
+          if ! echo "$IMAGE_DIGEST" \
+            | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+            echo "Deployment denied: invalid image digest"
+            exit 1
+          fi
+
+          EXPECTED_IMAGE_REF="ghcr.io/asaadfethallah/secureboard@${IMAGE_DIGEST}"
+
+          if [ "$IMAGE_REF" != "$EXPECTED_IMAGE_REF" ]; then
+            echo "Deployment denied: image reference and digest do not match"
+            echo
+            echo "Expected:"
+            echo "$EXPECTED_IMAGE_REF"
+            echo
+            echo "Received:"
+            echo "$IMAGE_REF"
+            exit 1
+          fi
+
+          echo "Immutable image identity accepted"
+
+      - name: Log in to GHCR
+        run: |
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io \
+                --username "$GITHUB_ACTOR" \
+                --password-stdin
+
+      - name: Pull pinned Cosign image
+        run: |
+          docker pull "$COSIGN_IMAGE"
+
+      - name: Enforce Cosign signature policy
+        run: |
+          set -euo pipefail
+
+          CERTIFICATE_IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
+
+          echo "Required Cosign identity:"
+          echo "$CERTIFICATE_IDENTITY"
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e DOCKER_CONFIG=/docker-config \
+            -v "$HOME/.docker:/docker-config:ro" \
+            "$COSIGN_IMAGE" \
+            verify \
+            "$IMAGE_REF" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Enforce provenance policy
+        run: |
+          set -euo pipefail
+
+          echo "Required source repository:"
+          echo "$GITHUB_REPOSITORY"
+
+          echo "Required source commit:"
+          echo "$GITHUB_SHA"
+
+          echo "Required source ref:"
+          echo "$GITHUB_REF"
+
+          gh attestation verify \
+            "oci://${IMAGE_REF}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle-from-oci \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF"
+
+      - name: Validate production image digest
+        run: |
+          set -euo pipefail
+
+          ./scripts/validate-prod-image.sh \
+            "$IMAGE_DIGEST"
+
+      - name: Prepare production Kubernetes overlay
+        run: |
+          set -euo pipefail
+
+          PLACEHOLDER_DIGEST="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+          rm -rf /tmp/secureboard-k8s
+          mkdir -p /tmp/secureboard-k8s
+
+          cp -R k8s/. \
+            /tmp/secureboard-k8s/
+
+          PROD_KUSTOMIZATION="/tmp/secureboard-k8s/overlays/prod/kustomization.yaml"
+
+          if ! grep -Fq \
+            "digest: ${PLACEHOLDER_DIGEST}" \
+            "$PROD_KUSTOMIZATION"; then
+
+            echo "Deployment denied: production digest placeholder was not found"
+            exit 1
+          fi
+
+          sed -i \
+            "s|digest: ${PLACEHOLDER_DIGEST}|digest: ${IMAGE_DIGEST}|" \
+            "$PROD_KUSTOMIZATION"
+
+          if grep -Fq \
+            "$PLACEHOLDER_DIGEST" \
+            "$PROD_KUSTOMIZATION"; then
+
+            echo "Deployment denied: placeholder digest remains after injection"
+            exit 1
+          fi
+
+          echo "Production digest injected successfully"
+
+      - name: Verify Kustomize renderer
+        run: |
+          set -euo pipefail
+
+          if ! command -v kubectl >/dev/null 2>&1; then
+            echo "Deployment denied: kubectl is not available on runner"
+            exit 1
+          fi
+
+          kubectl version \
+            --client
+
+      - name: Render production Kubernetes manifest
+        run: |
+          set -euo pipefail
+
+          kubectl kustomize \
+            /tmp/secureboard-k8s/overlays/prod \
+            > secureboard-prod.yaml
+
+          test -s secureboard-prod.yaml
+
+          echo "Production Kubernetes manifest rendered"
+
+      - name: Bind rendered manifest to authorized image
+        run: |
+          set -euo pipefail
+
+          EXPECTED_IMAGE="ghcr.io/asaadfethallah/secureboard@${IMAGE_DIGEST}"
+
+          IMAGE_COUNT=$(grep -F -c \
+            "image: ${EXPECTED_IMAGE}" \
+            secureboard-prod.yaml || true)
+
+          echo "Authorized image occurrences:"
+          echo "$IMAGE_COUNT"
+
+          if [ "$IMAGE_COUNT" -ne 2 ]; then
+            echo "Deployment denied: expected authorized image exactly twice"
+            echo "Expected one API container and one migration initContainer"
+            exit 1
+          fi
+
+          if grep -Eq \
+            'secureboard-api:k8s-local|secureboard-api:base|replace-by-ci' \
+            secureboard-prod.yaml; then
+
+            echo "Deployment denied: development image reference found in production manifest"
+            exit 1
+          fi
+
+          if grep -Fq \
+            'sha256:0000000000000000000000000000000000000000000000000000000000000000' \
+            secureboard-prod.yaml; then
+
+            echo "Deployment denied: placeholder digest found in production manifest"
+            exit 1
+          fi
+
+          echo "Rendered manifest is bound to authorized immutable image"
+
+      - name: Enforce Checkov exception budget
+        run: |
+          set -euo pipefail
+
+          SKIP_COUNT=$(grep -c \
+            'checkov.io/skip' \
+            secureboard-prod.yaml || true)
+
+          echo "Documented Checkov exceptions:"
+          echo "$SKIP_COUNT"
+
+          if [ "$SKIP_COUNT" -ne 1 ]; then
+            echo "Deployment denied: unexpected number of Checkov exceptions"
+            exit 1
+          fi
+
+          if ! grep -Fq \
+            'CKV_K8S_40=' \
+            secureboard-prod.yaml; then
+
+            echo "Deployment denied: expected PostgreSQL UID exception is missing"
+            exit 1
+          fi
+
+          echo "Checkov exception budget accepted"
+
+      - name: Pull Checkov image
+        run: |
+          docker pull "$CHECKOV_IMAGE"
+
+      - name: Enforce production Kubernetes IaC policy
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$PWD:/work:ro" \
+            "$CHECKOV_IMAGE" \
+            -f /work/secureboard-prod.yaml \
+            --framework kubernetes
+
+      - name: Generate production manifest integrity record
+        run: |
+          set -euo pipefail
+
+          sha256sum \
+            secureboard-prod.yaml \
+            > secureboard-prod.yaml.sha256
+
+          MANIFEST_SHA256=$(cut -d ' ' -f1 \
+            secureboard-prod.yaml.sha256)
+
+          echo "PROD_MANIFEST_SHA256=$MANIFEST_SHA256" \
+            >> "$GITHUB_ENV"
+
+          echo "Production manifest SHA256:"
+          echo "$MANIFEST_SHA256"
+
+      - name: Upload authorized production manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-production-manifest
+          path: |
+            secureboard-prod.yaml
+            secureboard-prod.yaml.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Authorize deployment
+        run: |
+          echo "=========================================="
+          echo "SECUREBOARD DEPLOYMENT POLICY"
+          echo "=========================================="
+          echo "Immutable digest:          PASS"
+          echo "Image/digest binding:      PASS"
+          echo "Cosign signature:          PASS"
+          echo "Expected OIDC identity:    PASS"
+          echo "Build provenance:          PASS"
+          echo "Repository identity:       PASS"
+          echo "Source commit:             PASS"
+          echo "Source ref:                PASS"
+          echo "Kubernetes image binding:  PASS"
+          echo "Checkov exception budget:  PASS"
+          echo "Production IaC policy:     PASS"
+          echo "Rendered manifest hash:    PASS"
+          echo
+          echo "DEPLOYMENT AUTHORIZED"
+          echo
+          echo "Image:"
+          echo "$IMAGE_REF"
+          echo
+          echo "Manifest SHA256:"
+          echo "$PROD_MANIFEST_SHA256"
+          echo "=========================================="
+
+      - name: Log out from GHCR
+        if: always()
+        run: |
+          docker logout ghcr.io || true
