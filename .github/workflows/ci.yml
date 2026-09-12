@@ -897,7 +897,7 @@ jobs:
 
           if [ "$IMAGE_COUNT" -ne 2 ]; then
             echo "Deployment denied: expected authorized image exactly twice"
-            echo "Expected one API container and one migration initContainer"
+            echo "Expected one API container and one migration Job"
             exit 1
           fi
 
