@@ -719,23 +719,49 @@ jobs:
 
     env:
       IMAGE_REF: ${{ needs.publish_image.outputs.image_ref }}
+      IMAGE_DIGEST: ${{ needs.publish_image.outputs.image_digest }}
+
       COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8
+      CHECKOV_IMAGE: bridgecrew/checkov:3.3.17
+
       GHCR_TOKEN: ${{ github.token }}
       GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Validate immutable image reference
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Validate immutable image identity
         run: |
+          set -euo pipefail
+
           echo "Candidate deployment image:"
           echo "$IMAGE_REF"
 
-          if ! echo "$IMAGE_REF" \
-            | grep -Eq '^ghcr\.io/asaadfethallah/secureboard@sha256:[a-f0-9]{64}$'; then
-            echo "Deployment denied: image is not an approved immutable digest reference"
+          echo
+          echo "Candidate deployment digest:"
+          echo "$IMAGE_DIGEST"
+
+          if ! echo "$IMAGE_DIGEST" \
+            | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+            echo "Deployment denied: invalid image digest"
             exit 1
           fi
 
-          echo "Immutable image reference accepted"
+          EXPECTED_IMAGE_REF="ghcr.io/asaadfethallah/secureboard@${IMAGE_DIGEST}"
+
+          if [ "$IMAGE_REF" != "$EXPECTED_IMAGE_REF" ]; then
+            echo "Deployment denied: image reference and digest do not match"
+            echo
+            echo "Expected:"
+            echo "$EXPECTED_IMAGE_REF"
+            echo
+            echo "Received:"
+            echo "$IMAGE_REF"
+            exit 1
+          fi
+
+          echo "Immutable image identity accepted"
 
       - name: Log in to GHCR
         run: |
@@ -750,6 +776,8 @@ jobs:
 
       - name: Enforce Cosign signature policy
         run: |
+          set -euo pipefail
+
           CERTIFICATE_IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
 
           echo "Required Cosign identity:"
@@ -768,6 +796,8 @@ jobs:
 
       - name: Enforce provenance policy
         run: |
+          set -euo pipefail
+
           echo "Required source repository:"
           echo "$GITHUB_REPOSITORY"
 
@@ -785,22 +815,202 @@ jobs:
             --source-digest "$GITHUB_SHA" \
             --source-ref "$GITHUB_REF"
 
+      - name: Validate production image digest
+        run: |
+          set -euo pipefail
+
+          ./scripts/validate-prod-image.sh \
+            "$IMAGE_DIGEST"
+
+      - name: Prepare production Kubernetes overlay
+        run: |
+          set -euo pipefail
+
+          PLACEHOLDER_DIGEST="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+          rm -rf /tmp/secureboard-k8s
+          mkdir -p /tmp/secureboard-k8s
+
+          cp -R k8s/. \
+            /tmp/secureboard-k8s/
+
+          PROD_KUSTOMIZATION="/tmp/secureboard-k8s/overlays/prod/kustomization.yaml"
+
+          if ! grep -Fq \
+            "digest: ${PLACEHOLDER_DIGEST}" \
+            "$PROD_KUSTOMIZATION"; then
+
+            echo "Deployment denied: production digest placeholder was not found"
+            exit 1
+          fi
+
+          sed -i \
+            "s|digest: ${PLACEHOLDER_DIGEST}|digest: ${IMAGE_DIGEST}|" \
+            "$PROD_KUSTOMIZATION"
+
+          if grep -Fq \
+            "$PLACEHOLDER_DIGEST" \
+            "$PROD_KUSTOMIZATION"; then
+
+            echo "Deployment denied: placeholder digest remains after injection"
+            exit 1
+          fi
+
+          echo "Production digest injected successfully"
+
+      - name: Verify Kustomize renderer
+        run: |
+          set -euo pipefail
+
+          if ! command -v kubectl >/dev/null 2>&1; then
+            echo "Deployment denied: kubectl is not available on runner"
+            exit 1
+          fi
+
+          kubectl version \
+            --client
+
+      - name: Render production Kubernetes manifest
+        run: |
+          set -euo pipefail
+
+          kubectl kustomize \
+            /tmp/secureboard-k8s/overlays/prod \
+            > secureboard-prod.yaml
+
+          test -s secureboard-prod.yaml
+
+          echo "Production Kubernetes manifest rendered"
+
+      - name: Bind rendered manifest to authorized image
+        run: |
+          set -euo pipefail
+
+          EXPECTED_IMAGE="ghcr.io/asaadfethallah/secureboard@${IMAGE_DIGEST}"
+
+          IMAGE_COUNT=$(grep -F -c \
+            "image: ${EXPECTED_IMAGE}" \
+            secureboard-prod.yaml || true)
+
+          echo "Authorized image occurrences:"
+          echo "$IMAGE_COUNT"
+
+          if [ "$IMAGE_COUNT" -ne 2 ]; then
+            echo "Deployment denied: expected authorized image exactly twice"
+            echo "Expected one API container and one migration initContainer"
+            exit 1
+          fi
+
+          if grep -Eq \
+            'secureboard-api:k8s-local|secureboard-api:base|replace-by-ci' \
+            secureboard-prod.yaml; then
+
+            echo "Deployment denied: development image reference found in production manifest"
+            exit 1
+          fi
+
+          if grep -Fq \
+            'sha256:0000000000000000000000000000000000000000000000000000000000000000' \
+            secureboard-prod.yaml; then
+
+            echo "Deployment denied: placeholder digest found in production manifest"
+            exit 1
+          fi
+
+          echo "Rendered manifest is bound to authorized immutable image"
+
+      - name: Enforce Checkov exception budget
+        run: |
+          set -euo pipefail
+
+          SKIP_COUNT=$(grep -c \
+            'checkov.io/skip' \
+            secureboard-prod.yaml || true)
+
+          echo "Documented Checkov exceptions:"
+          echo "$SKIP_COUNT"
+
+          if [ "$SKIP_COUNT" -ne 1 ]; then
+            echo "Deployment denied: unexpected number of Checkov exceptions"
+            exit 1
+          fi
+
+          if ! grep -Fq \
+            'CKV_K8S_40=' \
+            secureboard-prod.yaml; then
+
+            echo "Deployment denied: expected PostgreSQL UID exception is missing"
+            exit 1
+          fi
+
+          echo "Checkov exception budget accepted"
+
+      - name: Pull Checkov image
+        run: |
+          docker pull "$CHECKOV_IMAGE"
+
+      - name: Enforce production Kubernetes IaC policy
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$PWD:/work:ro" \
+            "$CHECKOV_IMAGE" \
+            -f /work/secureboard-prod.yaml \
+            --framework kubernetes
+
+      - name: Generate production manifest integrity record
+        run: |
+          set -euo pipefail
+
+          sha256sum \
+            secureboard-prod.yaml \
+            > secureboard-prod.yaml.sha256
+
+          MANIFEST_SHA256=$(cut -d ' ' -f1 \
+            secureboard-prod.yaml.sha256)
+
+          echo "PROD_MANIFEST_SHA256=$MANIFEST_SHA256" \
+            >> "$GITHUB_ENV"
+
+          echo "Production manifest SHA256:"
+          echo "$MANIFEST_SHA256"
+
+      - name: Upload authorized production manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: secureboard-production-manifest
+          path: |
+            secureboard-prod.yaml
+            secureboard-prod.yaml.sha256
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Authorize deployment
         run: |
           echo "=========================================="
           echo "SECUREBOARD DEPLOYMENT POLICY"
           echo "=========================================="
-          echo "Immutable digest:       PASS"
-          echo "Cosign signature:       PASS"
-          echo "Expected OIDC identity: PASS"
-          echo "Build provenance:       PASS"
-          echo "Repository identity:    PASS"
-          echo "Source commit:          PASS"
-          echo "Source ref:             PASS"
+          echo "Immutable digest:          PASS"
+          echo "Image/digest binding:      PASS"
+          echo "Cosign signature:          PASS"
+          echo "Expected OIDC identity:    PASS"
+          echo "Build provenance:          PASS"
+          echo "Repository identity:       PASS"
+          echo "Source commit:             PASS"
+          echo "Source ref:                PASS"
+          echo "Kubernetes image binding:  PASS"
+          echo "Checkov exception budget:  PASS"
+          echo "Production IaC policy:     PASS"
+          echo "Rendered manifest hash:    PASS"
           echo
           echo "DEPLOYMENT AUTHORIZED"
           echo
+          echo "Image:"
           echo "$IMAGE_REF"
+          echo
+          echo "Manifest SHA256:"
+          echo "$PROD_MANIFEST_SHA256"
           echo "=========================================="
 
       - name: Log out from GHCR

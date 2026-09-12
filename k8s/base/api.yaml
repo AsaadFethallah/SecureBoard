@@ -60,8 +60,8 @@ spec:
 
       initContainers:
         - name: database-migrations
-          image: secureboard-api:k8s-local
-          imagePullPolicy: Never
+          image: secureboard-api:base
+          imagePullPolicy: IfNotPresent
 
           command:
             - alembic
@@ -103,8 +103,8 @@ spec:
 
       containers:
         - name: api
-          image: secureboard-api:k8s-local
-          imagePullPolicy: Never
+          image: secureboard-api:base
+          imagePullPolicy: IfNotPresent
 
           ports:
             - name: http
