@@ -957,15 +957,40 @@ jobs:
         run: |
           set -euo pipefail
 
-          MIGRATION_RESOURCES=$(kubectl create \
-            --dry-run=client \
-            -f secureboard-prod-migration.yaml \
-            -o name)
+          resource_list() {
+            awk '
+              /^kind:[[:space:]]+/ {
+                kind=$2
+                next
+              }
 
-          APPLICATION_RESOURCES=$(kubectl create \
-            --dry-run=client \
-            -f secureboard-prod-application.yaml \
-            -o name)
+              /^metadata:[[:space:]]*$/ {
+                in_metadata=1
+                next
+              }
+
+              in_metadata && /^  name:[[:space:]]+/ {
+                name=$2
+
+                if (kind != "" && name != "") {
+                  print kind "/" name
+                }
+
+                in_metadata=0
+                next
+              }
+
+              /^[^[:space:]]/ {
+                in_metadata=0
+              }
+            ' "$1"
+          }
+
+          MIGRATION_RESOURCES=$(resource_list \
+            secureboard-prod-migration.yaml)
+
+          APPLICATION_RESOURCES=$(resource_list \
+            secureboard-prod-application.yaml)
 
           echo "Migration phase resources:"
           echo "$MIGRATION_RESOURCES"
@@ -974,30 +999,44 @@ jobs:
           echo "Application phase resources:"
           echo "$APPLICATION_RESOURCES"
 
-          if echo "$MIGRATION_RESOURCES" \
-            | grep -Fxq 'deployment.apps/secureboard-api'; then
+          MIGRATION_API_COUNT=$(printf '%s\n' \
+            "$MIGRATION_RESOURCES" \
+            | grep -Fxc 'Deployment/secureboard-api' || true)
 
+          MIGRATION_JOB_COUNT=$(printf '%s\n' \
+            "$MIGRATION_RESOURCES" \
+            | grep -Fxc 'Job/secureboard-db-migrate' || true)
+
+          APPLICATION_API_COUNT=$(printf '%s\n' \
+            "$APPLICATION_RESOURCES" \
+            | grep -Fxc 'Deployment/secureboard-api' || true)
+
+          APPLICATION_JOB_COUNT=$(printf '%s\n' \
+            "$APPLICATION_RESOURCES" \
+            | grep -Fxc 'Job/secureboard-db-migrate' || true)
+
+          echo
+          echo "Migration API count:      $MIGRATION_API_COUNT"
+          echo "Migration Job count:      $MIGRATION_JOB_COUNT"
+          echo "Application API count:    $APPLICATION_API_COUNT"
+          echo "Application Job count:    $APPLICATION_JOB_COUNT"
+
+          if [ "$MIGRATION_API_COUNT" -ne 0 ]; then
             echo "Deployment denied: API Deployment exists in migration phase"
             exit 1
           fi
 
-          if ! echo "$MIGRATION_RESOURCES" \
-            | grep -Fxq 'job.batch/secureboard-db-migrate'; then
-
-            echo "Deployment denied: migration Job missing from migration phase"
+          if [ "$MIGRATION_JOB_COUNT" -ne 1 ]; then
+            echo "Deployment denied: migration phase must contain exactly one migration Job"
             exit 1
           fi
 
-          if ! echo "$APPLICATION_RESOURCES" \
-            | grep -Fxq 'deployment.apps/secureboard-api'; then
-
-            echo "Deployment denied: API Deployment missing from application phase"
+          if [ "$APPLICATION_API_COUNT" -ne 1 ]; then
+            echo "Deployment denied: application phase must contain exactly one API Deployment"
             exit 1
           fi
 
-          if echo "$APPLICATION_RESOURCES" \
-            | grep -Fxq 'job.batch/secureboard-db-migrate'; then
-
+          if [ "$APPLICATION_JOB_COUNT" -ne 0 ]; then
             echo "Deployment denied: migration Job exists in application phase"
             exit 1
           fi
