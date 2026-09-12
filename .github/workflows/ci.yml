@@ -636,6 +636,7 @@ jobs:
         run: |
           docker run --rm \
             --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             -e ACTIONS_ID_TOKEN_REQUEST_URL \
             -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
             -e DOCKER_CONFIG=/docker-config \
@@ -654,6 +655,7 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             -e DOCKER_CONFIG=/docker-config \
             -v "$HOME/.docker:/docker-config:ro" \
             "$COSIGN_IMAGE" \
