@@ -16,3 +16,38 @@ patches:
       kind: Job
       metadata:
         name: secureboard-db-migrate
+
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: postgres
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: postgres
+
+  - target:
+      version: v1
+      kind: PersistentVolumeClaim
+      name: postgres-data
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: postgres-data
+
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: secureboard-migrations-network-policy
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: secureboard-migrations-network-policy

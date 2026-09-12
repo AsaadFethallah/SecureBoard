@@ -6,6 +6,62 @@ resources:
 
 patches:
   - target:
+      version: v1
+      kind: ConfigMap
+      name: secureboard-api-config
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: secureboard-api-config
+
+  - target:
+      version: v1
+      kind: Service
+      name: postgres
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: postgres
+
+  - target:
+      version: v1
+      kind: Service
+      name: secureboard-api
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: secureboard-api
+
+  - target:
+      version: v1
+      kind: PersistentVolumeClaim
+      name: postgres-data
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: postgres-data
+
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: postgres
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: postgres
+
+  - target:
       group: apps
       version: v1
       kind: Deployment
@@ -16,3 +72,27 @@ patches:
       kind: Deployment
       metadata:
         name: secureboard-api
+
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: postgres-network-policy
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: postgres-network-policy
+
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: secureboard-api-network-policy
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: secureboard-api-network-policy
